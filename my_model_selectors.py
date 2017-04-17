@@ -1,10 +1,8 @@
-import statistics
 import warnings
-from operator import itemgetter
 
+import math
 import numpy as np
 from hmmlearn.hmm import GaussianHMM
-from sklearn.base import BaseEstimator
 from sklearn.model_selection import KFold
 from asl_utils import combine_sequences
 
@@ -47,6 +45,53 @@ class ModelSelector(object):
                 print("failure on {} with {} states".format(self.this_word, num_states))
             return None
 
+    def create_and_fit(self, num_components, sequences_train, sequences_lengths_train):
+        model = self.base_model(num_components)
+        if not model:
+            if self.verbose:
+                print("Model is empty")
+            return None
+        assert isinstance(model, GaussianHMM)
+        model = model.fit(sequences_train, sequences_lengths_train)
+        if not model:
+            if self.verbose:
+                print("Model is empty")
+            return None
+        assert isinstance(model, GaussianHMM)
+        return model
+
+    def fit_and_score(self, num_components, sequences_train, sequences_lengths_train,
+                      sequences_test, sequences_lengths_test):
+        """
+        :return: model score for passed components number, using provided collections for fit and score.
+        """
+
+        try:
+            model = self.create_and_fit(num_components, sequences_train, sequences_lengths_train)
+            if not model:
+                return None
+            assert isinstance(model, GaussianHMM)
+            logL = model.score(sequences_test, sequences_lengths_test)
+            return logL
+        except:
+            if self.verbose:
+                print("Exception during training model")
+            return None
+
+    def filter_infos_and_produce_model(self, models_info):
+        best_model_info = sorted(models_info,
+                                 key=lambda info: np.mean(info.scores)
+                                 if (info and len(info.scores) > 0) else float("-inf"), reverse=True)[0]
+        if not best_model_info:
+            if self.verbose:
+                print("No models left after sorting")
+            return None
+        assert isinstance(best_model_info, ModelInfo)
+        if self.verbose:
+            print("Final num of components {}".format(best_model_info.num_components))
+        return self.base_model(best_model_info.num_components)
+
+
 
 class SelectorConstant(ModelSelector):
     """ select the model with value self.n_constant
@@ -77,8 +122,33 @@ class SelectorBIC(ModelSelector):
         """
         warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-        # TODO implement model selection based on BIC scores
-        raise NotImplementedError
+        models_info = [ModelInfo(num_components)
+                       for num_components in range(self.min_n_components, self.max_n_components + 1)]
+        for model_info in models_info:
+            try:
+                model_logL = self.fit_and_score(model_info.num_components, self.X, self.lengths, self.X, self.lengths)
+                N, features = self.X.shape
+
+                """
+                Dana Sheahen April 6th at 10:31 AM  
+                There is one thing a little different for our project though...
+                in the paper, the initial distribution is estimated and therefore
+                those parameters are not "free parameters". 
+                However, hmmlearn will "learn" these for us if not provided. 
+                Therefore they are also free parameters:
+                => p = n*(n-1) + (n-1) + 2*d*n
+                       = n^2 + 2*d*n - 1
+                """
+
+                p = model_info.num_components ** 2 + 2 * features * model_info.num_components - 1
+                bic_score = -2 * model_logL + p * math.log(N)
+                models_info.score = bic_score
+            except:
+                if self.verbose:
+                    print("Exception during calculation BIC score for n_components: {}"
+                          .format(model_info.num_components))
+
+        return self.filter_infos_and_produce_model(models_info)
 
 
 class SelectorDIC(ModelSelector):
@@ -97,10 +167,11 @@ class SelectorDIC(ModelSelector):
         raise NotImplementedError
 
 
-class ModelCVInfo:
+class ModelInfo:
     def __init__(self, num_components):
         self.num_components = num_components
         self.scores = []
+        self.score = None
 
 
 class SelectorCV(ModelSelector):
@@ -115,7 +186,7 @@ class SelectorCV(ModelSelector):
             # But it's not fine situation for the further processing in any case
             return self.base_model(self.min_n_components)
 
-        models_info = [ModelCVInfo(num_components)
+        models_info = [ModelInfo(num_components)
                        for num_components in range(self.min_n_components, self.max_n_components + 1)]
 
         split_method = KFold()
@@ -130,37 +201,7 @@ class SelectorCV(ModelSelector):
                 if score:
                     model_info.scores.append(score)
                 else:
-                    print("Score is None, training failed")
-        best_model_info = sorted([
-            model_info if len(model_info.scores) > 0 else None for model_info in models_info],
-            key=lambda info: np.mean(info.scores) if info else float("-inf"), reverse=True)[0]
-        assert isinstance(best_model_info, ModelCVInfo)
-        if self.verbose:
-            print("Final num of components {}".format(best_model_info.num_components))
-        return self.base_model(best_model_info.num_components)
+                    if self.verbose:
+                        print("Score is None, training failed")
 
-    def fit_and_score(self, num_components, sequences_train, sequences_lengths_train,
-                      sequences_test, sequences_lengths_test):
-        """
-        :return: model score for passed components number 
-        """
-
-        try:
-            model = self.base_model(num_components)
-            if not model:
-                if self.verbose:
-                    print("Model is empty")
-                return None
-            assert isinstance(model, GaussianHMM)
-            model = model.fit(sequences_train, sequences_lengths_train)
-            if not model:
-                if self.verbose:
-                    print("Model is empty")
-                return None
-            assert isinstance(model, GaussianHMM)
-            logL = model.score(sequences_test, sequences_lengths_test)
-            return logL
-        except:
-            if self.verbose:
-                print("Exception during training model")
-            return None
+        return self.filter_infos_and_produce_model(models_info)
