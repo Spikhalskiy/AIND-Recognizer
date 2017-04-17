@@ -1,9 +1,10 @@
-import math
 import statistics
 import warnings
+from operator import itemgetter
 
 import numpy as np
 from hmmlearn.hmm import GaussianHMM
+from sklearn.base import BaseEstimator
 from sklearn.model_selection import KFold
 from asl_utils import combine_sequences
 
@@ -96,13 +97,70 @@ class SelectorDIC(ModelSelector):
         raise NotImplementedError
 
 
-class SelectorCV(ModelSelector):
-    ''' select best model based on average log Likelihood of cross-validation folds
+class ModelCVInfo:
+    def __init__(self, num_components):
+        self.num_components = num_components
+        self.scores = []
 
-    '''
+
+class SelectorCV(ModelSelector):
+    """ select best model based on average log Likelihood of cross-validation folds
+    """
 
     def select(self):
         warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-        # TODO implement model selection using CV
-        raise NotImplementedError
+        if len(self.sequences) <= 2:
+            # if we have very few train data - smaller better to reduce overfitting.
+            # But it's not fine situation for the further processing in any case
+            return self.base_model(self.min_n_components)
+
+        models_info = [ModelCVInfo(num_components)
+                       for num_components in range(self.min_n_components, self.max_n_components + 1)]
+
+        split_method = KFold()
+
+        for cv_train_idx, cv_test_idx in split_method.split(self.sequences):
+            sequences_train, sequences_lengths_train = combine_sequences(cv_train_idx, self.sequences)
+            sequences_test, sequences_lengths_test = combine_sequences(cv_test_idx, self.sequences)
+            for model_info in models_info:
+                score = self.fit_and_score(model_info.num_components,
+                                           sequences_train, sequences_lengths_train,
+                                           sequences_test, sequences_lengths_test)
+                if score:
+                    model_info.scores.append(score)
+                else:
+                    print("Score is None, training failed")
+        best_model_info = sorted([
+            model_info if len(model_info.scores) > 0 else None for model_info in models_info],
+            key=lambda info: np.mean(info.scores) if info else float("-inf"), reverse=True)[0]
+        assert isinstance(best_model_info, ModelCVInfo)
+        if self.verbose:
+            print("Final num of components {}".format(best_model_info.num_components))
+        return self.base_model(best_model_info.num_components)
+
+    def fit_and_score(self, num_components, sequences_train, sequences_lengths_train,
+                      sequences_test, sequences_lengths_test):
+        """
+        :return: model score for passed components number 
+        """
+
+        try:
+            model = self.base_model(num_components)
+            if not model:
+                if self.verbose:
+                    print("Model is empty")
+                return None
+            assert isinstance(model, GaussianHMM)
+            model = model.fit(sequences_train, sequences_lengths_train)
+            if not model:
+                if self.verbose:
+                    print("Model is empty")
+                return None
+            assert isinstance(model, GaussianHMM)
+            logL = model.score(sequences_test, sequences_lengths_test)
+            return logL
+        except:
+            if self.verbose:
+                print("Exception during training model")
+            return None
