@@ -73,15 +73,16 @@ class ModelSelector(object):
             assert isinstance(model, GaussianHMM)
             logL = model.score(sequences_test, sequences_lengths_test)
             return logL
-        except:
+        except Exception as e:
             if self.verbose:
-                print("Exception during training model")
+                print("Exception during training model {}".format(e))
             return None
 
-    def filter_infos_and_produce_model(self, models_info):
+    def select_info_and_produce_model(self, models_info):
         best_model_info = sorted(models_info,
-                                 key=lambda info: np.mean(info.scores)
-                                 if (info and len(info.scores) > 0) else float("-inf"), reverse=True)[0]
+                                 key=lambda info: info.score
+                                 if info and info.score else float("-inf"), reverse=True)[0]
+
         if not best_model_info:
             if self.verbose:
                 print("No models left after sorting")
@@ -90,7 +91,6 @@ class ModelSelector(object):
         if self.verbose:
             print("Final num of components {}".format(best_model_info.num_components))
         return self.base_model(best_model_info.num_components)
-
 
 
 class SelectorConstant(ModelSelector):
@@ -127,6 +127,10 @@ class SelectorBIC(ModelSelector):
         for model_info in models_info:
             try:
                 model_logL = self.fit_and_score(model_info.num_components, self.X, self.lengths, self.X, self.lengths)
+                if not model_logL:
+                    if self.verbose:
+                        print("No score for a model with num_components {}".format(model_info.num_components))
+                        continue
                 N, features = self.X.shape
 
                 """
@@ -142,13 +146,13 @@ class SelectorBIC(ModelSelector):
 
                 p = model_info.num_components ** 2 + 2 * features * model_info.num_components - 1
                 bic_score = -2 * model_logL + p * math.log(N)
-                models_info.score = bic_score
-            except:
+                model_info.score = bic_score
+            except Exception as e:
                 if self.verbose:
-                    print("Exception during calculation BIC score for n_components: {}"
-                          .format(model_info.num_components))
+                    print("Exception during calculation BIC score for n_components: {}, {}"
+                          .format(model_info.num_components, e))
 
-        return self.filter_infos_and_produce_model(models_info)
+        return self.select_info_and_produce_model(models_info)
 
 
 class SelectorDIC(ModelSelector):
@@ -163,14 +167,43 @@ class SelectorDIC(ModelSelector):
     def select(self):
         warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-        # TODO implement model selection based on DIC scores
-        raise NotImplementedError
+        models_info = [ModelInfo(num_components)
+                       for num_components in range(self.min_n_components, self.max_n_components + 1)]
+        for model_info in models_info:
+            try:
+                model = self.create_and_fit(model_info.num_components, self.X, self.lengths)
+                if not model:
+                    continue
+                assert isinstance(model, GaussianHMM)
+                logL = model.score(self.X, self.lengths)
+                other_words_scores = []
+                for word, (X, lengths) in self.hwords.items():
+                    if word != self.this_word:
+                        try:
+                            another_word_score = model.score(X, lengths)
+                            other_words_scores.append(another_word_score)
+                        except Exception as e:
+                            if self.verbose:
+                                print("Exception during traversing other words in DIC: {}, {}"
+                                      .format(model_info.num_components, e))
+
+                            continue
+
+                m = len(other_words_scores)
+                dic_score = logL - sum(other_words_scores) / (m - 1)
+                model_info.score = dic_score
+            except:
+                if self.verbose:
+                    print("Exception during calculation DIC score for n_components: {}, {}"
+                          .format(model_info.num_components, e))
+
+        return self.select_info_and_produce_model(models_info)
 
 
 class ModelInfo:
     def __init__(self, num_components):
         self.num_components = num_components
-        self.scores = []
+        self.scores = None
         self.score = None
 
 
@@ -188,6 +221,8 @@ class SelectorCV(ModelSelector):
 
         models_info = [ModelInfo(num_components)
                        for num_components in range(self.min_n_components, self.max_n_components + 1)]
+        for model_info in models_info:
+            model_info.scores = []
 
         split_method = KFold()
 
@@ -204,4 +239,11 @@ class SelectorCV(ModelSelector):
                     if self.verbose:
                         print("Score is None, training failed")
 
-        return self.filter_infos_and_produce_model(models_info)
+        for info in models_info:
+            if info:
+                if len(info.scores) > 0:
+                    info.score = np.mean(info.scores)
+                else:
+                    info.score = float("-inf")
+
+        return self.select_info_and_produce_model(models_info)
